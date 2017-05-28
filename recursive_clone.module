@@ -1,0 +1,1046 @@
+<?php
+
+/**
+ * @file
+ * Enables site to site cloning of content with entity translation.
+ *
+ * @todo: Fieldable Panels Panes integraion may still need work.
+ *  WW is moving away from FPP so no more time was put into it.
+ */
+
+define('RECURSIVE_CLONE_FORCE', 1);
+define('RECURSIVE_CLONE_REUSE', 2);
+
+/**
+ * Implements hook_ctools_plugin_directory().
+ */
+function recursive_clone_ctools_plugin_directory($module, $plugin) {
+  if ($module == 'restful') {
+    return 'plugins/' . $plugin;
+  }
+}
+
+/**
+ * Implements hook_menu().
+ */
+function recursive_clone_menu() {
+  $items['admin/content/clone'] = array(
+    'title' => 'Clone Content',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('recursive_clone_form', 3),
+    'access arguments' => array('clone content'),
+    'type' => MENU_LOCAL_TASK,
+  );
+  $items['admin/content/clone/%/view'] = array(
+    'title' => 'View Clone Tree',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('recursive_clone_ops_form', 3, 4),
+    'access arguments' => array('clone content'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/content/clone/%/execute'] = array(
+    'title' => 'Execute Clone',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('recursive_clone_ops_form', 3, 4),
+    'access arguments' => array('clone content'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['admin/content/clone/%/delete'] = array(
+    'title' => 'Delete Clone Data',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('recursive_clone_ops_form', 3, 4),
+    'access arguments' => array('clone content'),
+    'type' => MENU_CALLBACK,
+  );
+  $items['node/%/clone'] = array(
+    'title' => 'Clone',
+    'page callback' => 'recursive_clone_redirect',
+    'page arguments' => array(1),
+    'access arguments' => array('clone content'),
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_permission().
+ */
+function recursive_clone_permission() {
+  return array(
+    'clone content' => array(
+      'title' => t('Clone Content'),
+      'restrict access' => TRUE,
+    ),
+  );
+}
+
+/**
+ * Implements hook_form().
+ */
+function recursive_clone_form($form, &$form_state) {
+  $url = isset($_GET['url']) ? urldecode($_GET['url']) : '';
+
+  $form['active_imports'] = array(
+    '#markup' => recursive_clone_imports_table(),
+  );
+  $form['import_instructions'] = array(
+    '#markup' => "<p>" . t('NOTE: Please ensure all entities to be cloned are published and accessible.') . "</p>",
+  );
+  $form['url'] = array(
+    '#type' => 'textfield',
+    '#title' => t('URL to Clone'),
+    '#default_value' => $url,
+    '#description' => t('Enter the full endpoint URL that provides the JSON object to clone. Use the FULL URL for local as well as site to site cloning.'),
+  );
+  $form['crawl'] = array(
+    // Was once a checkbox to make crawling optional. Not crawling caused
+    // cloneds to end up with different revisions of same paragraphs items.
+    '#type' => 'hidden',
+    '#value' => 1,
+  );
+  $form['override'] = array(
+    '#type' => 'select',
+    '#title' => t('Override'),
+    '#options' => array(
+      RECURSIVE_CLONE_FORCE => t('Force Another Clone'),
+      RECURSIVE_CLONE_REUSE => t('Reuse Existing Clone'),
+    ),
+    '#description' => t('Clone will search for exising copies of the import based on origin and id. How should it proceed if it finds a duplicate?'),
+  );
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Clone'),
+  );
+  return $form;
+}
+
+/**
+ * Implements hook_form_validate().
+ */
+function recursive_clone_form_validate($form, &$form_state) {
+  $url_array = explode('/', $form_state['values']['url']);
+  $api_key = array_search('api', $url_array);
+  $type = $url_array[$api_key + 3];
+
+  // Try to request data from external endpoint.
+  $request_url = recursive_clone_check_basic_auth($form_state['values']['url']);
+  $response = drupal_http_request($request_url);
+  $verify = recursive_clone_json_verify($response, $type);
+  if ($verify !== TRUE) {
+    form_set_error('url', t('@error_message', array('@error_message' => $verify)));
+  }
+}
+
+/**
+ * Implements hook_form_submit().
+ */
+function recursive_clone_form_submit($form, &$form_state) {
+  // Try to request data from external endpoint.
+  $request_url = recursive_clone_check_basic_auth($form_state['values']['url']);
+  $response = drupal_http_request($request_url);
+  // Create import tree for referenced entities.
+  $data = drupal_json_decode($response->data);
+  recursive_clone_build_tree($data, NULL, $form_state['values']['crawl'], $form_state['values']['override']);
+}
+
+/**
+ * Implements hook_form().
+ *
+ * Ops for view, execute, delete on an import.
+ */
+function recursive_clone_ops_form($form, &$form_state, $id, $op) {
+  $form = array();
+  switch ($op) {
+    case 'view':
+      $link_options = array('attributes' => array('class' => array('button')));
+      $form['table'] = array(
+        '#markup' => recursive_clone_imports_table($id),
+      );
+      $form['ops'] = array(
+        '#markup' => l(t('Execute'), "admin/content/clone/$id/execute", $link_options) . ' ' . l(t('Delete'), "admin/content/clone/$id/delete", $link_options),
+      );
+      return $form;
+
+    default:
+      $form['id'] = array(
+        '#type' => 'hidden',
+        '#value' => $id,
+      );
+      $form['action'] = array(
+        '#type' => 'hidden',
+        '#value' => $op,
+      );
+      return confirm_form($form, t('Are you sure you want to @op the import?', array('@op' => $op)), "admin/content/clone/$id/view");
+  }
+}
+
+/**
+ * Submit handler for recursive_clone_ops_form().
+ */
+function recursive_clone_ops_form_submit($form, &$form_state) {
+  switch ($form_state['values']['action']) {
+    case 'execute':
+      // Run the batch importer.
+      recursive_clone_import($form_state['values']['id']);
+      break;
+
+    case 'delete':
+      db_delete('recursive_clone')
+        ->condition('import_id', $form_state['values']['id'])
+        ->execute();
+      drupal_set_message(t('Import @id has been deleted.', array('@id' => $form_state['values']['id'])));
+      break;
+  }
+  $form_state['redirect'] = array('admin/content/clone');
+}
+
+/**
+ * Helper function to build clone tree.
+ *
+ * Find all referenced items in an entity and create a tree for complete import.
+ *
+ * @param array $data
+ *   Decoded JSON response from endpoint.
+ * @param array $parent
+ *   The parent entity if any.
+ * @param bool $crawl
+ *   TRUE to recursively add child references to the import.
+ * @param int $override
+ *   The option to FORCE a clone or REUSE an entity if duplicate exists.
+ */
+function recursive_clone_build_tree($data, $parent = NULL, $crawl = TRUE, $override = NULL) {
+  // Parse entity url to rebuild child urls later.
+  $parsed_url = parse_url($data['self']['href']);
+  // Find entity type from path.
+  $parsed_path = explode('/', $parsed_url['path']);
+  $api_key = array_search('api', $parsed_path);
+  // Get the path prefix.
+  $path_prefix = '';
+  for ($i = 1; $i < $api_key; $i++) {
+    $path_prefix .= '/' . $parsed_path[$i];
+  }
+  $type = $parsed_path[$api_key + 3];
+
+  // Get import info and set parent variables, or start new import_id.
+  if (is_array($parent)) {
+    if (isset($parent['self'])) {
+      $import_id = $parent['self']['import_id'];
+      $parent_type = $parent['self']['type'];
+      $parent_field = $parent['self']['field'];
+      $parent_id = $parent['self']['id'];
+      $depth = $parent['self']['depth'] + 1;
+    }
+  }
+  else {
+    $existing = recursive_clone_tree_node_exists($data['self']['href']);
+
+    if ($existing) {
+      drupal_set_message(t('There is an import in progress that includes this entity. Import ID: @id', array('@id' => $existing)), 'error');
+      return;
+    }
+    $parent_type = $parent_field = $parent_id = NULL;
+    $import_id = recursive_clone_new_import_id();
+    $depth = 0;
+  }
+
+  foreach ($data['data'][0][$type] as $id => $entity) {
+    // Log this entity for import.
+    $insert = db_insert('recursive_clone')
+      ->fields(array(
+        'import_id' => $import_id,
+        'uid' => $GLOBALS['user']->uid,
+        'entity_id' => $id,
+        'entity_type' => $type,
+        'entity_url' => $data['self']['href'],
+        'cloned_id' => NULL,
+        'parent_type' => $parent_type,
+        'parent_field' => $parent_field,
+        'parent_id' => $parent_id,
+        'depth' => $depth,
+        'override' => $override,
+        'initiated' => REQUEST_TIME,
+      ))
+      ->execute();
+    // Add additional data to self for use as parent later.
+    $data['self']['import_id'] = $import_id;
+    $data['self']['type'] = $type;
+    $data['self']['id'] = $id;
+    $data['self']['depth'] = $depth;
+
+    if ($crawl) {
+      // Crawl this entity.
+      foreach ($entity as $key => $value) {
+        // Determine the type of entity and recursively add to import tree.
+        if ($key == 'panelizer') {
+          foreach ($value['page_manager']['display']['content'] as $panel) {
+            list($subkey, $subid) = explode(':', $panel['subtype']);
+            if ($subkey == 'fpid') {
+              // Create url for origin fpp.
+              $request_url = recursive_clone_check_basic_auth($parsed_url['scheme'] . '://' . $parsed_url['host'] . $path_prefix . '/api/v1.0/clone/fieldable_panels_pane/' . $subid);
+              $response = drupal_http_request($request_url);
+              $verify = recursive_clone_json_verify($response, 'fieldable_panels_pane');
+              if ($verify === TRUE) {
+                $child_data = drupal_json_decode($response->data);
+                // Recurse through this entity.
+                recursive_clone_build_tree($child_data, $data, $crawl, $override);
+              }
+              else {
+                $t_args = array('@verify' => $verify);
+                drupal_set_message(t('Failed _build_tree: @verify', $t_args), 'error');
+                watchdog('recursive_clone', 'Failed _build_tree: @verify', $t_args, WATCHDOG_ERROR);
+              }
+            }
+          }
+        }
+        // We can import entityreference and paragraphs fields.
+        if (strpos($key, 'field_') !== FALSE) {
+
+          $field_types = array('entityreference', 'paragraphs', 'taxonomy_term_reference');
+
+          // Types of entities we can clone if referenced by entityreference.
+          $clone_plugins = recursive_clone_plugins();
+
+          $field_info = field_info_field($key);
+
+          if (in_array($field_info['type'], $field_types) && !empty($value)) {
+            foreach ($value as $langcode => $ref) {
+              foreach ($ref as $delta => $ids) {
+                // Map type and id based on field type.
+                switch ($field_info['type']) {
+                  case 'entityreference':
+                    $entity_type = $field_info['settings']['target_type'];
+                    $entity_id = $ids['target_id'];
+                    if (!array_key_exists($entity_type, $clone_plugins)) {
+                      // No plugin for this entity type. Do not add to tree.
+                      drupal_set_message(t('No handler for @entity_type. Not importing.', array('@entity_type' => $entity_type)), 'warning');
+                      break 2;
+                    }
+                    break;
+
+                  case 'paragraphs':
+                    $entity_type = 'paragraphs_item';
+                    $entity_id = $ids['value'];
+                    break;
+
+                  case 'taxonomy_term_reference':
+                    $entity_type = 'taxonomy_term';
+                    $entity_id = $ids['tid'];
+
+                }
+                // Create url for origin entity.
+                $request_url = recursive_clone_check_basic_auth($parsed_url['scheme'] . '://' . $parsed_url['host'] . $path_prefix . '/api/v1.0/clone/' . $entity_type . '/' . $entity_id);
+                $response = drupal_http_request($request_url);
+                $verify = recursive_clone_json_verify($response, $entity_type);
+                if ($verify === TRUE) {
+                  $child_data = drupal_json_decode($response->data);
+                  // Add field name to new parent so it can be associated to
+                  // the entity on the next recursion.
+                  $data['self']['field'] = $key;
+                  // Recurse through this entity.
+                  recursive_clone_build_tree($child_data, $data, $crawl, $override);
+                }
+                else {
+                  $t_args = array(
+                    '@entity_type' => $entity_type,
+                    '@entity_id' => $entity_id,
+                    '@verify' => $verify
+                  );
+                  drupal_set_message(t('Failed _build_tree for @entity_type:@entity_id Message: @verify', $t_args), 'error');
+                  drupal_set_message(t('Please make sure source entities are published and accessible and try again.'), 'error');
+                  drupal_set_message(t('Removing partial tree from the import list.'), 'error');
+                  watchdog('recursive_clone', 'Failed _build_tree: @verify', $t_args, WATCHDOG_ERROR);
+                  // Delete items for this import id so we don't have partial tree.
+                  db_delete('recursive_clone')
+                    ->condition('import_id', $import_id)
+                    ->execute();
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Helper function to generate a new import id.
+ *
+ * @return: int $import_id
+ *  A new unique id to track this import.
+ */
+function recursive_clone_new_import_id() {
+  // Get the highest existing ID and add 1.
+  $result = db_select('recursive_clone', 'c')
+    ->fields('c', array('import_id'))
+    ->orderBy('import_id', 'DESC')
+    ->condition('depth', 0)
+    ->range(0, 1)
+    ->execute()
+    ->fetchField();
+  return $result + 1;
+}
+
+/**
+ * Helper function to check for existing import node in the tree.
+ *
+ * @param string $url
+ *   URL to the entity RESTful endpoint.
+ *
+ * @return int
+ *   Mixed import_id OR FALSE.
+ */
+function recursive_clone_tree_node_exists($url) {
+  $result = db_select('recursive_clone', 'c')
+    ->fields('c', array('import_id'))
+    ->condition('entity_url', $url)
+    ->execute()
+    ->fetchField();
+  if ($result) {
+    return $result;
+  }
+  return FALSE;
+}
+
+/**
+ * Builds a themed table to display any clone imports that may be pending.
+ *
+ * @param int $id
+ *   The import id if viewing the import tree of a specific import.
+ *   If FALSE, show only items with depth 0 with links to view tree.
+ *
+ * @return string
+ *   A themed table.
+ */
+function recursive_clone_imports_table($id = FALSE) {
+  $rows = array();
+  $query = db_select('recursive_clone', 'c');
+  if (is_numeric($id)) {
+    $query->condition('import_id', $id);
+    $query->fields('c', array(
+      'import_id',
+      'entity_url',
+      'depth',
+      'parent_type',
+      'parent_id',
+      'initiated',
+    ));
+    $header = array(
+      'ID',
+      'URL',
+      'Depth',
+      'Parent Type',
+      'Parent ID',
+      'Initiated',
+    );
+  }
+  else {
+    $query->condition('depth', 0);
+    $query->fields('c', array(
+      'import_id',
+      'entity_url',
+      'initiated',
+    ));
+    $header = array(
+      'ID',
+      'URL',
+      'Initiated',
+      '',
+    );
+  }
+  $query->orderBy('initiated', 'ASC');
+  $result = $query->execute();
+
+  while ($row = $result->fetchAssoc()) {
+    $view = l(t('view'), 'admin/content/clone/' . $row['import_id'] . '/view');
+    $execute = l(t('execute'), 'admin/content/clone/' . $row['import_id'] . '/execute');
+    $delete = l(t('delete'), 'admin/content/clone/' . $row['import_id'] . '/delete');
+    $row['initiated'] = date('Y-m-d', $row['initiated']);
+    $row['ops'] = !$id ? "$view $execute $delete" : '';
+    $rows[] = $row;
+  }
+  $table = theme('table', array(
+    'header' => $header,
+    'rows' => $rows,
+    'caption' => t('Each item on this table may include additional child entities that will also be cloned.'),
+  ));
+  return $table;
+}
+
+/**
+ * Batch Import Function for cloning entities.
+ *
+ * @param int $id
+ *   Import ID for this import.
+ */
+function recursive_clone_import($id) {
+  $q = db_select('recursive_clone', 'c')
+    ->condition('import_id', $id)
+    ->condition('cloned_id', NULL)
+    ->fields('c')
+    ->orderBy('depth', 'DESC')
+    ->execute();
+
+  $items = $q->fetchAll();
+  foreach ($items as $item) {
+    $operations[] = array('recursive_clone_process_import', array($item));
+  }
+  $batch = array(
+    'operations' => $operations,
+    'finished' => 'recursive_clone_import_batch_finished',
+    'title' => t('Processing Import'),
+    'init_message' => t('Import is starting.'),
+    'progress_message' => t('Processed @current out of @total.'),
+    'error_message' => t('Import has encountered an error.'),
+  );
+
+  batch_set($batch);
+}
+
+/**
+ * Import function for the batch process.
+ *
+ * @param object $item
+ *   The import object to clone.
+ * @param array $context
+ *   Contextual data.
+ */
+function recursive_clone_process_import($item, &$context) {
+  $entity_id = $item->entity_id;
+  $entity_type = $item->entity_type;
+  // Load the entity.
+  $request_url = recursive_clone_check_basic_auth($item->entity_url);
+  $response = drupal_http_request($request_url);
+  $verify = recursive_clone_json_verify($response, $entity_type);
+  if ($verify === TRUE) {
+    $data = drupal_json_decode($response->data);
+    $entity = $data['data'][0][$entity_type][$entity_id];
+    $entity['clone_data'] = $item;
+  }
+  else {
+    $t_args = array('@verify' => $verify);
+    drupal_set_message(t('Failed to verify in recursive_clone_process_import: @verify', $t_args), 'error');
+    watchdog('recursive_clone', 'Failed to verify in recursive_clone_process_import: @verify', $t_args, WATCHDOG_ERROR);
+    return;
+  }
+  // Determine local or external.
+  $parsed_url = parse_url($entity['clone_data']->entity_url);
+  // Check if local.
+  $parsed_path = explode('/', $parsed_url['path']);
+  $base_path = explode('/', base_path());
+  // US base_path comes up empty.
+  $base_path[1] = empty($base_path[1]) ? 'us' : $base_path[1];
+  $local = $parsed_path[1] == $base_path[1] ? TRUE : FALSE;
+  $api_key = array_search('api', $parsed_path);
+  // Get the path prefix.
+  $path_prefix = '';
+  for ($i = 1; $i < $api_key; $i++) {
+    $path_prefix .= '/' . $parsed_path[$i];
+  }
+  $origin_base = $parsed_url['scheme'] . '://' . $parsed_url['host'] . $path_prefix;
+  // If reuse is TRUE move on to the next import item.
+  $reuse = recursive_clone_reuse($entity, $origin_base, $local);
+  // Clone.
+  if (!$reuse) {
+    recursive_clone_clone($entity, $origin_base, $local);
+  }
+  // Update message during each run so we know where we are in the process.
+  $context['message'] = 'Now processing ' . $item->entity_url;
+  // Set import_id in results array so we can use for clean up when finished.
+  if (!isset($context['results']['import_id'])) {
+    $context['results']['import_id'] = $item->import_id;
+  }
+}
+
+/**
+ * Batch finished function for messages and clean up.
+ *
+ * @param bool $success
+ *   TRUE if the batch was successful.
+ *
+ * @param array $results
+ *   Results from the batch process.
+ *
+ * @param array $operations
+ *   Operations from the batch process.
+ */
+function recursive_clone_import_batch_finished($success, $results, $operations) {
+  if ($success) {
+    drupal_set_message(t('Import id:@id is complete!', array('@id' => $results['import_id'])));
+    recursive_clone_cleanup($results['import_id']);
+  }
+  else {
+    $error_operation = reset($operations);
+    $message = t('An error occurred while processing %error_operation with arguments: @arguments', array(
+      '%error_operation' => $error_operation[0],
+      '@arguments' => print_r($error_operation[1], TRUE)
+    ));
+    drupal_set_message($message, 'error');
+  }
+}
+
+
+/**
+ * Determine if an entity can be reused.
+ *
+ * @param object $entity
+ *   The entity to find duplicates for.
+ *
+ * @param string $origin
+ *   Origin base url for entity.
+ *
+ * @param bool $local
+ *   Whether local clone or external.
+ *
+ * @return bool
+ *   TRUE if entity is reused. Else FALSE.
+ */
+function recursive_clone_reuse(&$entity, $origin, $local) {
+  // Check node revision logs for clone comments.
+  $clone_plugins = recursive_clone_plugins();
+  $entity_type = $entity['clone_data']->entity_type;
+
+  if (!array_key_exists($entity_type, $clone_plugins)) {
+    return FALSE;
+  }
+  $info = $clone_plugins[$entity_type]->info;
+
+  if (!empty($info['reusable_callback'])) {
+    $function = $info['reusable_callback'];
+    $reuse = $function($entity, $info, $origin, $local);
+    return $reuse;
+  }
+  return FALSE;
+}
+
+/**
+ * Clone the entity.
+ *
+ * @param object $entity
+ *   The entity to clone.
+ * @param string $origin_base
+ *   The originating base url.
+ * @param bool $local
+ *   Whether the entity is local in origin.
+ */
+function recursive_clone_clone($entity, $origin_base, $local) {
+  $clone_data = $entity['clone_data'];
+  $clone = recursive_clone_entity_prepare($entity, $origin_base, $local);
+
+  $clone_plugins = recursive_clone_plugins();
+  $entity_type = $entity['clone_data']->entity_type;
+
+  if (array_key_exists($entity_type, $clone_plugins)) {
+    $info = $clone_plugins[$entity_type]->info;
+    $function = 'recursive_clone_' . $entity_type . '_clone';
+    if (function_exists($function)) {
+      $function($clone);
+    }
+
+    if ($cloned_id = $clone->$info['id_field']) {
+      // Item cloned_id gets updated.
+      db_update('recursive_clone')
+        ->fields(array(
+          'cloned_id' => $cloned_id,
+        ))
+        ->condition('import_id', $clone_data->import_id)
+        ->condition('entity_url', $clone_data->entity_url)
+        ->execute();
+      drupal_set_message(t('!entity_url cloned. New clone = !cloned_link', array(
+        '!entity_url' => $clone_data->entity_url,
+        '!cloned_link' => l($clone_data->entity_type . " $cloned_id", $info['local_entity_path'] . "/" . $cloned_id),
+      )));
+    }
+    else {
+      $t_args = array(
+        '@entity_type' => $entity_type,
+        '@entity_id' => $entity->import_id,
+      );
+      drupal_set_message(t('Clone handler did not exist for @entity_type: @entity_id', $t_args), 'error');
+      watchdog('recursive_clone', 'Clone handler did not exist for @entity_type: @entity_id', $t_args, WATCHDOG_ERROR);
+    }
+  }
+}
+
+/**
+ * Clean up import table after clone complete.
+ *
+ * @param int $import_id
+ *   The import id to remove from the table.
+ */
+function recursive_clone_cleanup($import_id) {
+  db_delete('recursive_clone')
+    ->condition('import_id', $import_id)
+    ->condition('cloned_id', 'NULL', '!=')
+    ->execute();
+
+  drupal_set_message(t('Process Complete'));
+  drupal_goto('admin/content/clone');
+}
+
+/**
+ * Prepare entity for cloning.
+ *
+ * @param array $original
+ *   The entity to prepare.
+ * @param string $origin_base
+ *   The origin base url for encoding origin to log.
+ */
+function recursive_clone_entity_prepare($original, $origin_base, $local = FALSE) {
+  $fields = field_info_fields();
+  $entity_type = $original['clone_data']->entity_type;
+  $entity = $original;
+
+  if (!$local) {
+    // Handle languages from other sites.
+    recursive_clone_entity_prepare_languages($entity, $fields);
+    // Handle media content from other sites.
+    recursive_clone_entity_media($entity, $fields);
+  }
+
+  // Update child entites with new ids.
+  recursive_clone_entity_child_update($entity, $original, $fields);
+
+  // Recast objects because drupal_json_decode exports array.
+  // Assumes if we're this far that entity clone handler is already loaded.
+  $function = 'recursive_clone_' . $entity_type . '_info';
+  if (function_exists($function)) {
+    $info = $function();
+    $entity = recursive_clone_objectify($entity, $entity_type, $info);
+    if ($info['objectify_entity']) {
+      $entity = (object) $entity;
+    }
+  }
+  $function = 'recursive_clone_' . $entity_type . '_prepare';
+  if (function_exists($function)) {
+    $function($entity, $original, $origin_base);
+  }
+  return $entity;
+}
+
+/**
+ * Update the child IDs on the current entity in process.
+ *
+ * @param array &$entity
+ *   The entity being processed.
+ * @param array $original
+ *   The unaltered entity.
+ * @param array $fields
+ *   The output of field_info_fields().
+ */
+function recursive_clone_entity_child_update(&$entity, $original, $fields) {
+  foreach ($fields as $field_name => $field) {
+    if (!empty($entity[$field_name])) {
+      switch ($field['type']) {
+
+        case 'paragraphs':
+          foreach ($entity[$field_name] as $lang => $items) {
+            foreach ($items as $i => $item) {
+              // Load the new id from the clone table.
+              $q = db_select('recursive_clone', 'c')
+                ->fields('c', array('cloned_id'))
+                ->condition('import_id', $original['clone_data']->import_id)
+                ->condition('entity_type', 'paragraphs_item')
+                ->condition('entity_id', $item['value'])
+                ->execute();
+              $cloned_id = $q->fetchField();
+
+              // Load the vid for the cloned paragraph item.
+              $q = db_select('paragraphs_item', 'p')
+                ->fields('p', array('revision_id'))
+                ->condition('item_id', $cloned_id)
+                ->execute();
+              $revision_id = $q->fetchField();
+
+              if ($cloned_id) {
+                $entity[$field_name][$lang][$i]['value'] = $cloned_id;
+                $entity[$field_name][$lang][$i]['revision_id'] = $revision_id;
+              }
+            }
+          }
+          break;
+
+        case 'entityreference':
+          foreach ($entity[$field_name] as $lang => $items) {
+            foreach ($items as $i => $item) {
+              // Load the new id from the clone table.
+              $q = db_select('recursive_clone', 'c')
+                ->fields('c', array('cloned_id'))
+                ->condition('import_id', $original['clone_data']->import_id)
+                ->condition('entity_type', $field['settings']['target_type'])
+                ->condition('entity_id', $item['target_id'])
+                ->execute();
+              $cloned_id = $q->fetchField();
+
+              $entity[$field_name][$lang][$i]['target_id'] = $cloned_id;
+            }
+          }
+          break;
+
+        case 'taxonomy_term_reference':
+          foreach ($entity[$field_name] as $lang => $items) {
+            foreach ($items as $i => $item) {
+              // Load the new id from the clone table.
+              $q = db_select('recursive_clone', 'c')
+                ->fields('c', array('cloned_id'))
+                ->condition('import_id', $original['clone_data']->import_id)
+                ->condition('entity_type', 'taxonomy_term')
+                ->condition('entity_id', $item['tid'])
+                ->execute();
+              $cloned_id = $q->fetchField();
+
+              $entity[$field_name][$lang][$i]['tid'] = $cloned_id;
+            }
+          }
+          break;
+      }
+    }
+  }
+}
+
+/**
+ * Recast appropriate arrays as objects based on entity type.
+ *
+ * Loading entitys from RESTful JSON converts objects to an array.
+ * this function resets them.
+ *
+ * @param: array $item
+ *  The array to objectify.
+ *
+ * @param: string $type
+ *  The type of object to recast.
+ *
+ * @param: array $info
+ *  The entity plugin info with list of keys to objectify.
+ *
+ * @return: array $item
+ *  The objectified $item. $item will be recast later where appropriate.
+ */
+function recursive_clone_objectify($item, $type, $info) {
+  foreach ($item as $key => $child) {
+    if (is_array($child)) {
+      $item[$key] = recursive_clone_objectify($child, $type, $info);
+    }
+    // Recast appropriate items as objects.
+    if (array_search($key, $info['object_keys'], TRUE) !== FALSE) {
+      $item[$key] = (object) $item[$key];
+    }
+  }
+  return $item;
+}
+
+/**
+ * Redirect Clone tab on node to clone page with url prepopulated.
+ */
+function recursive_clone_redirect($nid) {
+  $url = urlencode($GLOBALS['base_url'] . "/api/v1.0/clone/node/$nid");
+  drupal_goto('admin/content/clone', array('query' => array('url' => $url)));
+}
+
+/**
+ * Check for shield and add auth credentials to url.
+ *
+ * @param string $request_url
+ *   The url of the JSON endpoint to add basic auth to.
+ *
+ * @return string
+ *   The $request_url with additional auth info if shield module enabled.
+ */
+function recursive_clone_check_basic_auth($request_url) {
+  if (module_exists('shield')) {
+    $user = variable_get('shield_user', 'weightwatchers');
+    $pass = variable_get('shield_pass', 'weightwatchers');
+    $request_url = str_replace('://', "://$user:$pass@", $request_url);
+  }
+  return $request_url;
+}
+
+/**
+ * Reconcile language disparity between entities from different sites.
+ *
+ * @param array &$entity
+ *   The entity to process.
+ * @param array $fields
+ *   The results of field_info_fields().
+ */
+function recursive_clone_entity_prepare_languages(&$entity, $fields) {
+  $valid_langs = $invalid_langs = array();
+  $site_langs = array_keys(language_list());
+  $default_lang = language_default('language');
+
+  // Determine if a language in the entity is valid on this site.
+  if (!empty($entity['translations'])) {
+
+    foreach ($entity['translations']['data'] as $lang => $info) {
+      if (in_array($lang, $site_langs)) {
+        $valid_langs[] = $lang;
+      }
+      elseif ($lang != LANGUAGE_NONE) {
+        $invalid_langs[] = $lang;
+        drupal_set_message(t("Language @lang is NOT importable and will be removed.", array('@lang' => $lang)));
+      }
+    }
+
+    // If there are no compatible languages, set the local default language
+    // as base language for entity, and assign a remote language content. Even
+    // though the content will mismatch the langcode there will at least be
+    // placeholder content instead of an empty entity.
+    if (empty($valid_langs)) {
+      $valid_langs[] = $default_lang;
+      // Get the language to use as placeholder.
+      $surrogate_lang = $entity['translations']['original'];
+      // Set the entity default language as surrogate language.
+      $entity['language'] = $entity['translations']['original'] = $default_lang;
+      $entity['translations']['data'][$default_lang] = $entity['translations']['data'][$surrogate_lang];
+      // Also set metatag data.
+      if (isset($entity['metatags']) && !isset($entity['metatags'][LANGUAGE_NONE])) {
+        $entity['metatags'] = array($default_lang => $entity['metatags'][$surrogate_lang]);
+      }
+      $surrogate_warning = t(
+        'No compatable language for @type @id. @surrogate used as placeholder in @default fields.',
+        array(
+          '@type' => $entity['clone_data']->entity_type,
+          '@id' => $entity['clone_data']->entity_id,
+          '@surrogate' => $surrogate_lang,
+          '@default' => $default_lang,
+        )
+      );
+      drupal_set_message($surrogate_warning, 'warning');
+      // Set field's lang as surrogate language if LANGUAGE_NONE does not exist.
+      foreach ($fields as $field_name => $field_info) {
+        if (!empty($entity[$field_name]) && !isset($entity[$field_name][LANGUAGE_NONE]) && !empty($entity[$field_name][$surrogate_lang])) {
+          $entity[$field_name][$default_lang] = $entity[$field_name][$surrogate_lang];
+          // Insert placeholder message.
+          $placeholder_message = t(':: PLACEHOLDER for @lang ::', array('@lang' => $default_lang));
+          foreach ($entity[$field_name][$default_lang] as $key => $data) {
+            if ($field_info['module'] == 'text') {
+              if (!empty($data['value'])) {
+                $entity[$field_name][$default_lang][$key]['value'] = $placeholder_message . $data['value'];
+              }
+              if (!empty($data['safe_value'])) {
+                $entity[$field_name][$default_lang][$key]['safe_value'] = $placeholder_message . $data['safe_value'];
+              }
+            }
+          }
+        }
+      }
+    }
+    else {
+      // If site default lang is in the entity, set it as the original language.
+      if (in_array($default_lang, $valid_langs)) {
+        $entity['language'] = $entity['translations']['original'] = $default_lang;
+      }
+      // If not, use the first valid language.
+      else {
+        $entity['language'] = $entity['translations']['original'] = $valid_langs[0];
+      }
+    }
+  }
+
+  // Remove invalid languages from translations object, metatags and all fields.
+  if (!empty($invalid_langs)) {
+    foreach ($invalid_langs as $lang) {
+      if (isset($entity['translations']['data'][$lang])) {
+        unset($entity['translations']['data'][$lang]);
+      }
+      if (isset($entity['metatags'][$lang])) {
+        unset($entity['metatags'][$lang]);
+      }
+      foreach ($fields as $field_name => $field_info) {
+        if (isset($entity[$field_name]) && isset($entity[$field_name][$lang])) {
+          unset($entity[$field_name][$lang]);
+        }
+      }
+    }
+  }
+  // Correct translation data language and source.
+  foreach ($entity['translations']['data'] as $lang => $data) {
+    $entity['translations']['data'][$lang]['language'] = $lang;
+    $entity['translations']['data'][$lang]['source'] = $lang == $entity['language'] ? '' : $entity['language'];
+  }
+}
+
+/**
+ * Handle media in site to site cloning.
+ *
+ * Currently this just removes media content if the clone is not local.
+ * This could be used in the future to copy media from one site to another to
+ * be available for the clone.
+ *
+ * @param array &$entity
+ *   The entity to process.
+ * @param array $fields
+ *   The results of field_info_fields().
+ */
+function recursive_clone_entity_media(&$entity, $fields) {
+  foreach ($fields as $field_name => $field_info) {
+    switch ($field_info['type']) {
+      case 'image':
+        $entity[$field_name] = array();
+        break;
+
+      case 'recursive_sscp':
+        // Clear sscp file references.
+        foreach ($entity['field_sscp'] as $lang => $field) {
+          $entity['field_sscp'][$lang][0]['bg_retina_src'] = 0;
+          $entity['field_sscp'][$lang][0]['bg_src'] = 0;
+          $entity['field_sscp'][$lang][0]['floaty_retina_src'] = 0;
+          $entity['field_sscp'][$lang][0]['floaty_src'] = 0;
+          $entity['field_sscp'][$lang][0]['mobile_retina_src'] = 0;
+          $entity['field_sscp'][$lang][0]['mobile_src'] = 0;
+        }
+        break;
+    }
+  }
+}
+
+/**
+ * Verify the json response for an api call.
+ *
+ * @param object $response
+ *   The response from drupal_http_request().
+ *
+ * @return mixed
+ *   An error string, or TRUE.
+ */
+function recursive_clone_json_verify($response, $type) {
+  $type = $type == 'fieldable_panels_pane' ? 'fpp' : $type;
+  if (isset($response->error)) {
+    return t('@error', array('@error' => $response->error));
+  }
+  if (strpos($response->headers['content-type'], 'application/json') === FALSE) {
+    return t('Wrong content type in response.');
+  }
+  $data = drupal_json_decode($response->data);
+  if (empty($data['data']) || !is_array($data['data'][0][$type])) {
+    return t('Resource is not valid.');
+  }
+  return TRUE;
+}
+
+/**
+ * Helper function to return a list of available plugins.
+ *
+ * @return array
+ *   List of importer files keyed by name.
+ */
+function recursive_clone_plugins() {
+  $recursive_clone_plugins = &drupal_static(__FUNCTION__);
+
+  if (!isset($recursive_clone_plugins)) {
+    $module_path = drupal_get_path('module', 'recursive_clone');
+    $recursive_clone_plugins = file_scan_directory($module_path . '/plugins/import', '/.*\.inc$/', array('key' => 'name'));
+    foreach ($recursive_clone_plugins as $name => $plugin) {
+      // Load the plugin.
+      require_once($plugin->uri);
+      // Save the plugin info to the static variable.
+      $function = 'recursive_clone_' . $name . '_info';
+      if (function_exists($function)) {
+        $recursive_clone_plugins[$name]->info = $function();
+      }
+    }
+  }
+
+  return $recursive_clone_plugins;
+}

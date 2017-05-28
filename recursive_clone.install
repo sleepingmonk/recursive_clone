@@ -1,0 +1,92 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the recursive_clone module.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function recursive_clone_schema() {
+  $schema['recursive_clone'] = array(
+    'description' => 'Items to clone.',
+    'fields' => array(
+      'import_id' => array(
+        'description' => 'A unique ID to group recursive entity references for one clone job.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+      ),
+      'uid' => array(
+        'description' => 'User ID of the user who initiated the clone.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+      ),
+      'entity_id' => array(
+        'description' => 'The ID of the entity to clone.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+      ),
+      'entity_type' => array(
+        'description' => 'The entity type of the entity to clone.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+      ),
+      'entity_url' => array(
+        'description' => 'The URL of the entity to clone.  Either a JSON feed or internal drupal path.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+      ),
+      'cloned_id' => array(
+        'description' => 'The new ID of the CLONED copy of the entity.',
+        'type' => 'int',
+        'not null' => FALSE,
+        'unsigned' => TRUE,
+      ),
+      'parent_type' => array(
+        'description' => 'The entity type of this entity\'s parent.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => FALSE,
+      ),
+      'parent_field' => array(
+        'description' => 'The field name this entity is referenced by in it\'s parent.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => FALSE,
+      ),
+      'parent_id' => array(
+        'description' => 'The ID of this entity\'s Parent.',
+        'type' => 'int',
+        'not null' => FALSE,
+        'unsigned' => TRUE,
+      ),
+      'depth' => array(
+        'description' => 'The depth of reference in tree.',
+        'type' => 'int',
+        'size' => 'tiny',
+        'not null' => FALSE,
+        'unsigned' => TRUE,
+      ),
+      'override' => array(
+        'description' => 'How an import should handle existing duplicates.',
+        'type' => 'int',
+        'size' => 'tiny',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+        'default' => 0,
+      ),
+      'initiated' => array(
+        'description' => 'The Unix timestamp when the clone process was initiated.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0),
+    ),
+  );
+  return $schema;
+}

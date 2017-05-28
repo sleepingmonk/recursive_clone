@@ -1,0 +1,6 @@
+name = Recursive Clone
+description = Provides the ability to clone content with referenced entities, locally or site to site.
+core = 7.x
+package = Recursive Clone
+project = recursive_clone
+dependencies[] = restful (<=7.x-1.x)
