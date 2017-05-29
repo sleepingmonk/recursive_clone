@@ -849,8 +849,8 @@ function recursive_clone_redirect($nid) {
  */
 function recursive_clone_check_basic_auth($request_url) {
   if (module_exists('shield')) {
-    $user = variable_get('shield_user', 'weightwatchers');
-    $pass = variable_get('shield_pass', 'weightwatchers');
+    $user = variable_get('shield_user', FALSE);
+    $pass = variable_get('shield_pass', FALSE);
     $request_url = str_replace('://', "://$user:$pass@", $request_url);
   }
   return $request_url;
