@@ -5,7 +5,7 @@
  * Enables site to site cloning of content with entity translation.
  *
  * @todo: Fieldable Panels Panes integraion may still need work.
- *  WW is moving away from FPP so no more time was put into it.
+ *  Focus shifted to paragraphs instead, so no more time was put into it.
  */
 
 define('RECURSIVE_CLONE_FORCE', 1);
@@ -95,7 +95,7 @@ function recursive_clone_form($form, &$form_state) {
   );
   $form['crawl'] = array(
     // Was once a checkbox to make crawling optional. Not crawling caused
-    // cloneds to end up with different revisions of same paragraphs items.
+    // clones to end up with different revisions of same paragraphs items.
     '#type' => 'hidden',
     '#value' => 1,
   );
