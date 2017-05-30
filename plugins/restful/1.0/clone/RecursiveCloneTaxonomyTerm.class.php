@@ -6,7 +6,7 @@
  */
 
 /**
- * RESTful class for Cloning Nodes.
+ * RESTful class for Cloning Taxonomy Terms.
  */
 class RecursiveCloneTaxonomyTerm extends \RestfulEntityBase implements \RestfulEntityInterface {
 

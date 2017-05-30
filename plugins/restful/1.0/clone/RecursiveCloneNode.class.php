@@ -33,7 +33,7 @@ class RecursiveCloneNode extends \RestfulEntityBase implements \RestfulEntityInt
    *  The fpid to load, passed from the url.
    *
    * @return: array $items
-   *  An array of results keyed by fpid.
+   *  An array of results keyed by nid.
    */
   protected function collectCloneData($object, $nid) {
 

@@ -6,13 +6,13 @@
  */
 
 /**
- * RESTful class for Cloning Nodes.
+ * RESTful class for Cloning Paragraphs Items.
  */
 class RecursiveCloneParagraphsItem extends \RestfulEntityBase implements \RestfulEntityInterface {
 
   /**
    * @return: array $public_fields.
-   *  An array containing a Node keyed by nid.
+   *  An array containing a Paragraphs Item keyed by item id.
    */
   public function publicFieldsInfo() {
     $public_fields['paragraphs_item'] = array(
